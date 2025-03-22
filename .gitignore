@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Node.js
+node_modules/
+dist/
+out/
+
+# VS Code Extension
+*.vsix
+.vscode-test/
+
+# WASM build artifacts
+backspace-analyzer/pkg/
+backspace-analyzer/target/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
