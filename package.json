@@ -14,7 +14,8 @@
     "onLanguage:*",
     "onCommand:backspace-detective.startTracking",
     "onCommand:backspace-detective.stopTracking",
-    "onCommand:backspace-detective.showStats"
+    "onCommand:backspace-detective.showStats",
+    "onCommand:backspace-detective.resetStats"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -30,6 +31,10 @@
       {
         "command": "backspace-detective.showStats",
         "title": "Show Backspace Statistics"
+      },
+      {
+        "command": "backspace-detective.resetStats",
+        "title": "Reset Backspace Statistics"
       }
     ],
     "configuration": {

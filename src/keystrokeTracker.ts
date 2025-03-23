@@ -3,6 +3,7 @@
 // This class tracks keystrokes and analyzes backspace usage
 
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { StatusBarManager } from './statusBarManager';
 import { analyzeEditingPattern } from './wasmLoader';
 
@@ -28,6 +29,7 @@ export class KeystrokeTracker implements vscode.Disposable {
     private sessionStartTime = 0;
     private currentFile = '';
     private fileStats: Map<string, EditingStats> = new Map();
+    private workspaceFolders: readonly vscode.WorkspaceFolder[] = [];
 
     constructor(
         private context: vscode.ExtensionContext,
@@ -35,6 +37,8 @@ export class KeystrokeTracker implements vscode.Disposable {
         private outputChannel?: vscode.OutputChannel
     ) {
         this.log('KeystrokeTracker initialized');
+        // Store workspace folders for filtering
+        this.workspaceFolders = vscode.workspace.workspaceFolders || [];
     }
 
     private log(message: string): void {
@@ -42,6 +46,48 @@ export class KeystrokeTracker implements vscode.Disposable {
             this.outputChannel.appendLine(message);
         }
         console.log(message);
+    }
+
+    /**
+     * Check if a file URI is within the current workspace folders
+     */
+    private isFileInWorkspace(uri: vscode.Uri): boolean {
+        if (this.workspaceFolders.length === 0) {
+            // If no workspace is open, only track actual file schemes
+            return uri.scheme === 'file';
+        }
+
+        // Check if the file is within any workspace folder
+        return this.workspaceFolders.some(folder => {
+            return uri.fsPath.startsWith(folder.uri.fsPath);
+        });
+    }
+
+    /**
+     * Check if a document is a regular text file we should track
+     * (excludes output, debug console, etc.)
+     */
+    private shouldTrackDocument(document: vscode.TextDocument): boolean {
+        // Only track file scheme documents (excludes output, debug console)
+        if (document.uri.scheme !== 'file') {
+            this.log(`Ignoring non-file document: ${document.uri.scheme}`);
+            return false;
+        }
+
+        // Check if it's in our workspace
+        if (!this.isFileInWorkspace(document.uri)) {
+            this.log(`Ignoring file outside workspace: ${document.uri.fsPath}`);
+            return false;
+        }
+
+        // Optionally, add more exclusions here, like specific file extensions
+        // if needed in the future
+
+        return true;
+    }
+
+    public isCurrentlyTracking(): boolean {
+        return this.isTracking;
     }
 
     public startTracking(): void {
@@ -58,25 +104,35 @@ export class KeystrokeTracker implements vscode.Disposable {
         this.sessionStartTime = Date.now();
         this.statusBarManager.update('$(eye) Tracking');
 
+        // Refresh workspace folders list in case it changed
+        this.workspaceFolders = vscode.workspace.workspaceFolders || [];
+        this.log(`Workspace folders: ${this.workspaceFolders.map(f => f.uri.fsPath).join(', ')}`);
+
         // Get current file if there's an active editor
         const activeEditor = vscode.window.activeTextEditor;
-        if (activeEditor) {
+        if (activeEditor && this.shouldTrackDocument(activeEditor.document)) {
             this.currentFile = activeEditor.document.uri.fsPath;
             this.log(`Current file set to: ${this.currentFile}`);
         }
 
         // Listen for key presses in text editor
         const keySubscription = vscode.workspace.onDidChangeTextDocument((event) => {
-            this.log(`Document changed: ${event.document.uri.fsPath}, Changes: ${event.contentChanges.length}`);
-            
+            // Skip empty changes
             if (event.contentChanges.length === 0) {
                 return;
             }
 
+            // Skip non-workspace files and special editors
+            if (!this.shouldTrackDocument(event.document)) {
+                return;
+            }
+
+            const documentPath = event.document.uri.fsPath;
+            this.log(`Processing changes in: ${documentPath}, ${event.contentChanges.length} changes`);
+
             // Track the current file being edited
-            if (event.document.uri.fsPath !== this.currentFile) {
-                this.currentFile = event.document.uri.fsPath;
-                this.log(`Switched to file: ${this.currentFile}`);
+            if (documentPath !== this.currentFile) {
+                this.currentFile = documentPath;
                 
                 // Initialize stats for this file if not already tracked
                 if (!this.fileStats.has(this.currentFile)) {
@@ -110,6 +166,18 @@ export class KeystrokeTracker implements vscode.Disposable {
                 const rangeLength = change.rangeLength;
                 const text = change.text;
                 
+                // Heuristic to identify likely paste operations or automated edits
+                const isProbablyPaste = text.length > 10 && (
+                    text.includes('\n') || // Multi-line paste
+                    !this.isNormalTypingPattern(text) // Unusual character sequence
+                );
+
+                // Heuristic for automated edits like auto-formatting
+                const isLikelyAutomatedEdit = event.reason === vscode.TextDocumentChangeReason.Undo ||
+                                            event.reason === vscode.TextDocumentChangeReason.Redo ||
+                                            // Large number of changes at once often indicates automated edits
+                                            event.contentChanges.length > 5;
+
                 if (text === '') {
                     // Content was deleted
                     if (rangeLength === 1) {
@@ -128,22 +196,38 @@ export class KeystrokeTracker implements vscode.Disposable {
                             // Likely backspace
                             fileStats.backspace_count++;
                             this.stats.backspace_count++;
+                            this.log(`Backspace detected at ${position.line}:${position.character}`);
                         } else {
                             // Likely delete
                             fileStats.delete_count++;
                             this.stats.delete_count++;
+                            this.log(`Delete detected at ${position.line}:${position.character}`);
                         }
                     } else if (rangeLength > 1) {
                         // Multi-character deletion (selection + delete)
+                        // Count as a single keystroke rather than multiple
                         fileStats.total_keystrokes++;
                         this.stats.total_keystrokes++;
+                        this.log(`Multi-character deletion: ${rangeLength} characters`);
                     }
-                } else {
-                    // Content was added
-                    fileStats.total_keystrokes += text.length;
+                } else if (isProbablyPaste) {
+                    // This is likely a paste operation, count as a single operation
+                    fileStats.total_keystrokes++;
+                    this.stats.total_keystrokes++;
                     fileStats.characters_typed += text.length;
-                    this.stats.total_keystrokes += text.length;
                     this.stats.characters_typed += text.length;
+                    this.log(`Paste detected: ${text.length} characters (counting as 1 keystroke)`);
+                } else if (isLikelyAutomatedEdit) {
+                    // This is likely an automated edit, don't count as keystrokes
+                    this.log(`Automated edit detected, not counting as keystrokes`);
+                } else {
+                    // Normal text input - count each character as a keystroke
+                    const keystrokeCount = text.length;
+                    fileStats.total_keystrokes += keystrokeCount;
+                    fileStats.characters_typed += keystrokeCount;
+                    this.stats.total_keystrokes += keystrokeCount;
+                    this.stats.characters_typed += keystrokeCount;
+                    this.log(`Text added: "${text.length > 10 ? text.substring(0, 10) + '...' : text}" (${keystrokeCount} keystrokes)`);
                 }
                 
                 // Update timing data
@@ -161,8 +245,9 @@ export class KeystrokeTracker implements vscode.Disposable {
 
         // Listen for editor changes to update the current file
         const editorSubscription = vscode.window.onDidChangeActiveTextEditor((editor) => {
-            if (editor) {
+            if (editor && this.shouldTrackDocument(editor.document)) {
                 this.currentFile = editor.document.uri.fsPath;
+                this.log(`Switched to file: ${this.currentFile}`);
             }
         });
 
@@ -244,5 +329,19 @@ export class KeystrokeTracker implements vscode.Disposable {
 
     public dispose(): void {
         this.stopTracking();
+    }
+
+    /**
+     * Determines if text input looks like normal human typing
+     * (vs. templates, code snippets, etc.)
+     */
+    private isNormalTypingPattern(text: string): boolean {
+        // Check for unusual patterns that might indicate templates or generated code
+        const hasRepeatedSpaces = /\s{3,}/.test(text);
+        const hasCodeFormattingPatterns = /[{|}|;]\s*\n/.test(text);
+        const hasTabsOrMultipleIndentation = /\t|\s{2,}\S/.test(text);
+        
+        // If any of these patterns are found, it's likely not normal typing
+        return !(hasRepeatedSpaces || hasCodeFormattingPatterns || hasTabsOrMultipleIndentation);
     }
 }
