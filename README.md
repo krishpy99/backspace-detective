@@ -41,7 +41,7 @@ This extension monitors these patterns in your coding and provides a prediction 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/backspace-detective.git
+git clone https://github.com/krishpy99/backspace-detective.git
 cd backspace-detective
 
 # Install dependencies
