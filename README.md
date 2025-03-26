@@ -2,8 +2,6 @@
 
 A VSCode extension that counts backspace usage while coding to predict whether code was written by AI or a human.
 
-![Screenshot of Backspace Detective](resources/screenshot.png)
-
 ## Features
 
 - Tracks keystrokes and backspace usage in real-time
